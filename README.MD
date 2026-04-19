@@ -8,7 +8,7 @@ A Python crawler that finds illegal live sports streams. Given a match keyword, 
 
 1. Runs 7 rounds of DuckDuckGo searches with varied query templates for the target keyword
 2. Feeds all results to Gemini, which picks the 10 most promising piracy candidate URLs
-3. DFS-crawls each candidate with a stealth headless browser (crawl4ai)
+3. DFS-crawls each candidate with a stealth headless browser powered by [crawl4ai](https://github.com/unclecode/crawl4ai)
 4. At each page: scores it with rule-based heuristics + LLM, detects and dismisses ad overlays, extracts m3u8 / RTMP / iframe stream URLs from HTML and network traffic
 5. Verifies each discovered URL is a live feed (not VOD or highlights) via LLM
 6. Persists streams, crawl tree, session metadata, and logs to MongoDB
@@ -29,11 +29,13 @@ cd spcrawler
 pip install -e .
 ```
 
-After installation, run the crawl4ai browser setup:
+After installation, run the [crawl4ai](https://github.com/unclecode/crawl4ai) browser setup:
 
 ```bash
 crawl4ai-setup
 ```
+
+> crawl4ai handles all headless browser management, stealth configurations, iframe processing, and network request capture. See the [crawl4ai docs](https://github.com/unclecode/crawl4ai) for advanced browser options.
 
 ---
 
@@ -62,7 +64,7 @@ LOG_LEVEL=info
 | `GEMINI_API_KEY` | Yes | Gemini API key used for LLM calls |
 | `MONGO_URI` | Yes | MongoDB connection string |
 | `DB_NAME` | Yes | Database name to store sessions and streams |
-| `PROXY_URL` | No | HTTP/HTTPS proxy for the headless browser |
+| `PROXY_URL` | No | HTTP/HTTPS proxy passed through to the crawl4ai browser |
 | `LOG_LEVEL` | No | `debug`, `info`, `warn`, or `error` (default: `info`) |
 
 ---
@@ -119,6 +121,33 @@ streams    = scraper.get_streams()
 
 ---
 
+## Package layout
+
+```
+spcrawler/
+├── src/
+│   ├── __init__.py          # Scraper, ProxyManager exports
+│   ├── log.py               # Logging setup
+│   ├── client/
+│   │   ├── llm.py           # LLM methods (pick, navigate, score, verify)
+│   │   ├── model.py         # Gemini API client with retry + throttle
+│   │   └── prompts.py       # All LLM prompt templates
+│   ├── instance/
+│   │   ├── scraper.py       # Main Scraper class
+│   │   ├── check.py         # Stream URL and iframe detection logic
+│   │   └── proxy_manager.py # Proxy configuration
+│   └── utils/
+│       ├── config.py        # Config dataclass
+│       ├── constants.py     # All tunable constants
+│       └── db.py            # MongoDB interface
+├── test.py                  # Standalone runner (no install needed)
+├── pyproject.toml
+├── setup.py
+└── requirements.txt
+```
+
+---
+
 ## Tuning
 
 All crawler behaviour is controlled through constants in `src/utils/constants.py`:
@@ -132,6 +161,16 @@ All crawler behaviour is controlled through constants in `src/utils/constants.py
 | `PIRACY_SCORE_THRESHOLD` | 60 | Score above which a page is flagged |
 | `LLM_SCORE_TRIGGER` | 40 | Rule score above which LLM scoring kicks in |
 | `MAX_DEAD_PAGES_BEFORE_BACKTRACK` | 4 | Dead-end streak before a branch is pruned |
+
+---
+
+## Dependencies
+
+- [crawl4ai](https://github.com/unclecode/crawl4ai) — headless browser engine, stealth crawling, iframe and network capture
+- [ddgs](https://pypi.org/project/ddgs/) — DuckDuckGo search
+- [pymongo](https://pypi.org/project/pymongo/) — MongoDB client
+- [requests](https://pypi.org/project/requests/) — Gemini API calls
+- [python-dotenv](https://pypi.org/project/python-dotenv/) — environment variable loading
 
 ---
 
