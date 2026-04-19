@@ -30,8 +30,8 @@ DDGS_SEARCH_QUERIES = [
     "{keyword} stream hd free",
     "{keyword} live stream link",
     "{keyword} free stream reddit",
-    "{keyword} acestream sopcast",
-    "{keyword} crackstream hesgoal",
+    "{keyword} watch free telegram",
+    "{keyword} live free",
 ]
 
 # ── Scoring ───────────────────────────────────────────────────────────────────

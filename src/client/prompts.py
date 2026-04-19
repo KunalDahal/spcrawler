@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-# ---------------------------------------------------------------------------
-# PICK BEST PIRACY URLS  (from 105 DDGS results)
-# ---------------------------------------------------------------------------
 PICK_PIRACY_URLS_SYSTEM = """\
 You are a sports-piracy stream hunter.
 Given a list of search results (URL + title), pick the 10 URLs most likely to
@@ -36,9 +33,6 @@ Search results ({n} total):
 Return the 10 best piracy-stream candidate URLs as a JSON array.
 """
 
-# ---------------------------------------------------------------------------
-# NAVIGATE  (decide next URL to visit during DFS crawl)
-# ---------------------------------------------------------------------------
 NAVIGATE_SYSTEM = """\
 You are a live-stream crawler hunting for an ACTIVE ILLEGAL sports stream.
 Your job: given the current page, decide where to go next to find a live video
@@ -85,9 +79,6 @@ Stream URLs: {scheme_urls}
 Visited    : {visited_json}
 """
 
-# ---------------------------------------------------------------------------
-# SCORE PAGE  (0-100 piracy likelihood)
-# ---------------------------------------------------------------------------
 SCORE_SYSTEM = """\
 You are a sports-piracy detection expert.
 Rate how likely this page is to be hosting or directly linking to an ACTIVE
@@ -109,9 +100,6 @@ Score LOW (0-30) if:
 Return ONLY a single integer 0–100. No text, no punctuation.
 """
 
-# ---------------------------------------------------------------------------
-# AD / OVERLAY DETECTION  (should we click skip / close?)
-# ---------------------------------------------------------------------------
 AD_CHECK_SYSTEM = """\
 You are reviewing a webpage for interstitial ads, overlays, or "Skip" buttons
 that block access to the underlying video player.
@@ -134,9 +122,6 @@ Snippet: {snippet}
 Button texts visible: {buttons}
 """
 
-# ---------------------------------------------------------------------------
-# VERIFY LIVE  (is a discovered URL truly a live feed?)
-# ---------------------------------------------------------------------------
 VERIFY_LIVE_SYSTEM = """\
 Determine whether the given URL is a LIVE stream or a static / VOD asset.
 

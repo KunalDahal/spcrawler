@@ -14,9 +14,6 @@ class LLM:
     def __init__(self, model: Model) -> None:
         self._model = model
 
-    # ------------------------------------------------------------------
-    # Pick 10 best piracy candidate URLs from 105 DDGS results
-    # ------------------------------------------------------------------
     def pick_piracy_urls(
         self,
         search_results: list[dict],
@@ -39,13 +36,9 @@ class LLM:
                 return [u for u in urls if isinstance(u, str) and u.startswith("http")][:n]
         except Exception:
             pass
-        # fallback: grab anything that looks like a URL
         found = re.findall(r'https?://[^\s"\'<>,\]]+', raw)
         return found[:n]
 
-    # ------------------------------------------------------------------
-    # Navigate: decide next URL(s) to visit
-    # ------------------------------------------------------------------
     def navigate(
         self,
         page_data:    dict,
@@ -80,7 +73,6 @@ class LLM:
         try:
             clean = re.sub(r"```[a-z]*|```", "", raw).strip()
             data  = json.loads(clean)
-            # normalise single next_url → next_urls list
             if "next_url" in data and "next_urls" not in data:
                 nxt = data["next_url"]
                 data["next_urls"] = [nxt] if nxt else []
@@ -91,9 +83,6 @@ class LLM:
             log.warning("navigate parse error: %s | raw: %s", exc, raw[:200])
             return {"action": "stop", "next_urls": [], "reason": "parse error", "signal": "none"}
 
-    # ------------------------------------------------------------------
-    # Score page (0-100)
-    # ------------------------------------------------------------------
     def score_page(self, page_data: dict, task_url: str) -> int:
         payload = (
             f"URL: {task_url}\n"
@@ -111,14 +100,7 @@ class LLM:
             log.error("score_page failed: %s", exc)
             return 0
 
-    # ------------------------------------------------------------------
-    # Ad / overlay detection
-    # ------------------------------------------------------------------
     def check_ads(self, page_data: dict) -> dict:
-        """
-        Returns dict: {has_ad, action, wait_seconds, selector_hint}
-        """
-        # Collect visible button/link texts from the snippet
         snippet = (page_data.get("text_snippet") or "")[:600]
         buttons = re.findall(r'\b(skip|close|continue|proceed|dismiss|allow|accept)\b',
                              snippet, re.IGNORECASE)
@@ -140,9 +122,6 @@ class LLM:
             log.warning("check_ads parse error: %s", exc)
             return {"has_ad": False, "action": "none", "wait_seconds": 0, "selector_hint": ""}
 
-    # ------------------------------------------------------------------
-    # Verify live stream
-    # ------------------------------------------------------------------
     def verify_live(self, url: str, context: str = "") -> bool:
         payload = f"URL: {url}\nContext: {context[:300]}"
         try:

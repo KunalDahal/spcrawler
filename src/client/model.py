@@ -22,13 +22,11 @@ _BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 
 log = get_logger("spcrawler.model")
 
-# ── Module-level singleton so one Model instance is shared across sessions ────
 _cached_model: "Model | None" = None
 _model_lock   = threading.Lock()
 
 
 def get_model(cfg: Config) -> "Model":
-    """Return the module-level cached Model, creating it once."""
     global _cached_model
     with _model_lock:
         if _cached_model is None:
