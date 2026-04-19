@@ -121,33 +121,6 @@ streams    = scraper.get_streams()
 
 ---
 
-## Package layout
-
-```
-spcrawler/
-├── src/
-│   ├── __init__.py          # Scraper, ProxyManager exports
-│   ├── log.py               # Logging setup
-│   ├── client/
-│   │   ├── llm.py           # LLM methods (pick, navigate, score, verify)
-│   │   ├── model.py         # Gemini API client with retry + throttle
-│   │   └── prompts.py       # All LLM prompt templates
-│   ├── instance/
-│   │   ├── scraper.py       # Main Scraper class
-│   │   ├── check.py         # Stream URL and iframe detection logic
-│   │   └── proxy_manager.py # Proxy configuration
-│   └── utils/
-│       ├── config.py        # Config dataclass
-│       ├── constants.py     # All tunable constants
-│       └── db.py            # MongoDB interface
-├── test.py                  # Standalone runner (no install needed)
-├── pyproject.toml
-├── setup.py
-└── requirements.txt
-```
-
----
-
 ## Tuning
 
 All crawler behaviour is controlled through constants in `src/utils/constants.py`:
