@@ -1,131 +1,140 @@
 # spcrawler
 
-`spcrawler` is a Python crawler for finding suspicious sports streaming pages and extracting likely live stream targets such as `m3u8`, `mpd`, `rtmp`, and iframe embeds.
+A Python crawler that finds illegal live sports streams. Given a match keyword, it runs multi-turn DuckDuckGo searches, uses a Gemini LLM to rank and navigate piracy sites, extracts stream URLs via a headless browser, and stores everything in MongoDB.
 
-## Repository Layout
+---
 
-The repository root is named `spcrawler`, and the Python source code now lives in `src/`.
+## How it works
 
-```text
-spcrawler/
-|- pyproject.toml
-|- setup.py
-|- requirements.txt
-|- .env.example
-|- test.py
-`- src/
-   |- __init__.py
-   |- log.py
-   |- client/
-   |- instance/
-   `- utils/
-```
+1. Runs 7 rounds of DuckDuckGo searches with varied query templates for the target keyword
+2. Feeds all results to Gemini, which picks the 10 most promising piracy candidate URLs
+3. DFS-crawls each candidate with a stealth headless browser (crawl4ai)
+4. At each page: scores it with rule-based heuristics + LLM, detects and dismisses ad overlays, extracts m3u8 / RTMP / iframe stream URLs from HTML and network traffic
+5. Verifies each discovered URL is a live feed (not VOD or highlights) via LLM
+6. Persists streams, crawl tree, session metadata, and logs to MongoDB
 
-## Packaging Layout
-
-`pyproject.toml` and `setup.py` should stay in the repository root.
-
-That is still the correct place for them even though the code is under `src/`:
-
-- the repository root is the Python project root
-- `src/` contains the package source code
-- the packaging files tell `pip` how to expose that source as the `spcrawler` package
-
-This repo is not using a `src/spcrawler/` tree. Instead, the packaging config maps:
-
-- package name: `spcrawler`
-- source directory: `src/`
-
-So after installation, imports stay:
-
-```python
-from spcrawler import Scraper
-from spcrawler.log import get_logger
-```
-
-## Requirements
-
-- Python `3.11+`
-- MongoDB
-- `GEMINI_API_KEY`
-
-Dependencies are kept aligned across:
-
-- `pyproject.toml`
-- `setup.py`
-- `requirements.txt`
+---
 
 ## Installation
 
-Create and activate a virtual environment:
-
-```powershell
-python -m venv .venv
-.venv\Scripts\Activate.ps1
+```bash
+pip install spcrawler
 ```
 
-Install dependencies:
+Or install from source:
 
-```powershell
-pip install -r requirements.txt
-```
-
-Install the package in editable mode from the repository root:
-
-```powershell
+```bash
+git clone https://github.com/KunalDahal/spcrawler.git
+cd spcrawler
 pip install -e .
 ```
 
-Editable install is important here because the package name is `spcrawler` while the source directory is `src/`.
+After installation, run the crawl4ai browser setup:
 
-## Environment Variables
+```bash
+crawl4ai-setup
+```
 
-Create a `.env` file in the repository root.
+---
 
-Example:
+## Requirements
+
+- Python 3.11+
+- MongoDB (local or remote)
+- Gemini API key — get one at [aistudio.google.com](https://aistudio.google.com)
+
+---
+
+## Configuration
+
+Create a `.env` file in your project root:
 
 ```env
-GEMINI_API_KEY=your_api_key_here
+GEMINI_API_KEY=your_key_here
 MONGO_URI=mongodb://localhost:27017
 DB_NAME=sports_scraper
 PROXY_URL=
 LOG_LEVEL=info
 ```
 
-`DB_NAME` is the correct key for the current runner and package code.
+| Variable | Required | Description |
+|---|---|---|
+| `GEMINI_API_KEY` | Yes | Gemini API key used for LLM calls |
+| `MONGO_URI` | Yes | MongoDB connection string |
+| `DB_NAME` | Yes | Database name to store sessions and streams |
+| `PROXY_URL` | No | HTTP/HTTPS proxy for the headless browser |
+| `LOG_LEVEL` | No | `debug`, `info`, `warn`, or `error` (default: `info`) |
 
-## Running the Project
+---
 
-The current root-level runner is `test.py`.
-It imports directly from `src/`, so you can run it from the repository without first installing the package.
-
-```powershell
-python test.py
-```
-
-Inside that file, the crawler currently runs with a hardcoded sample keyword:
+## Usage
 
 ```python
-"RR vs KKR watch free live"
+import asyncio
+from spcrawler import Scraper
+
+async def main():
+    scraper = Scraper(
+        keyword   = "RR vs KKR live stream",
+        api_key   = "your_gemini_key",
+        mongo_uri = "mongodb://localhost:27017",
+        db_name   = "sports_scraper",
+        proxy_url = "",
+    )
+
+    streams = await scraper.run()
+
+    for url in streams:
+        print(url)
+
+asyncio.run(main())
 ```
 
-Change that value in `test.py` if you want to target a different match or search phrase.
+`scraper.run()` returns a list of verified live stream URLs found for the keyword.
 
-## Package Contents
+### Synchronous usage
 
-- `src/client`: LLM client, prompts, and model helpers
-- `src/instance`: scraper runtime, stream checks, and proxy handling
-- `src/utils`: config, constants, and database helpers
-- `src/log.py`: logging setup
-- `src/__init__.py`: package exports for `Scraper` and `ProxyManager`
+```python
+scraper = Scraper(keyword="RR vs KKR live stream", api_key="...", ...)
+streams = scraper.run_sync()
+```
 
-## Summary
+### Accessing session data
 
-The updated structure is:
+```python
+session_id = scraper.session_id
+streams    = scraper.get_streams()
+```
 
-- root folder name: `spcrawler`
-- package metadata files: repository root
-- source code: `src/`
-- import name after install: `spcrawler`
+---
 
-That setup is now reflected in the packaging files and the environment example.
+## What gets stored in MongoDB
+
+| Collection | Contents |
+|---|---|
+| `sessions` | One document per run — keyword, status, stream count, pages crawled |
+| `pages_{session_id}` | Every crawled page — URL, title, score, links, iframes, stream URLs |
+| `streams` | Every verified live stream URL with source page and stream type |
+| `logs` | Timestamped log entries per session |
+
+---
+
+## Tuning
+
+All crawler behaviour is controlled through constants in `src/utils/constants.py`:
+
+| Constant | Default | Description |
+|---|---|---|
+| `DDGS_TURNS` | 7 | Number of search rounds |
+| `DDGS_PER_TURN` | 15 | Results per round |
+| `MAX_DEPTH` | 6 | Maximum DFS crawl depth |
+| `MAX_TOTAL_PAGES` | 60 | Hard page cap across all candidates |
+| `PIRACY_SCORE_THRESHOLD` | 60 | Score above which a page is flagged |
+| `LLM_SCORE_TRIGGER` | 40 | Rule score above which LLM scoring kicks in |
+| `MAX_DEAD_PAGES_BEFORE_BACKTRACK` | 4 | Dead-end streak before a branch is pruned |
+
+---
+
+## License
+
+MIT
