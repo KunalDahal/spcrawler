@@ -275,10 +275,6 @@ class Scraper:
             db.finish_session(sid)
             return []
 
-        root_node = self._make_root_node(all_results)
-        self._upsert_node(root_node)
-        log.info("Root node inserted  (%d links)", len(all_results))
-
         db.log(sid, "info", f"LLM ranking {len(all_results)} links for top piracy candidates...")
         candidates = await self._llm_call(
             self._llm.pick_piracy_urls, all_results, self.keyword, 10
@@ -293,13 +289,18 @@ class Scraper:
         for i, u in enumerate(candidates, 1):
             log.info("  %2d. %s", i, u)
 
+        # One dedicated MongoDB collection per parent/candidate URL.
+        # register_parent_trees seeds each collection with a depth=0 document.
+        tree_map: dict[str, str] = db.register_parent_trees(sid, candidates)
+
         for idx, start_url in enumerate(candidates, 1):
             if self._total_pages >= MAX_TOTAL_PAGES:
                 db.log(sid, "info", f"Page cap ({MAX_TOTAL_PAGES}) reached — stopping.")
                 break
-            log.info("Candidate %d/%d  %s", idx, len(candidates), start_url)
+            col_name = tree_map[start_url]
+            log.info("Candidate %d/%d  col=%s  %s", idx, len(candidates), col_name, start_url)
             db.log(sid, "info", f"Crawling candidate {idx}/{len(candidates)}: {start_url}")
-            await self._dfs(start_url)
+            await self._dfs(start_url, col_name)
             if idx < len(candidates):
                 await asyncio.sleep(_BETWEEN_DFS_WAIT)
 
@@ -331,7 +332,7 @@ class Scraper:
             "crawled_at":   datetime.now(timezone.utc).isoformat(),
         }
 
-    async def _dfs(self, start_url: str) -> None:
+    async def _dfs(self, start_url: str, tree_col_name: str) -> None:
         proxy = self._proxy.get()
         browser_cfg = BrowserConfig(
             headless            = HEADLESS_BROWSER,
@@ -382,12 +383,15 @@ class Scraper:
                     log.warning("Crawl failed — skipping: %s", url)
                     continue
 
+                # Stamp depth so every stored document carries it.
+                page_data["depth"] = depth
+
                 await self._handle_ads(crawler, run_cfg, url, page_data)
 
                 rule  = _rule_score(page_data)
                 score = await self._score_page_async(page_data, rule)
                 page_data["score"] = score
-                self._upsert_node(page_data)
+                self._upsert_node(page_data, tree_col_name)
 
                 _flag = "FLAGGED" if score >= PIRACY_SCORE_THRESHOLD else "clean"
                 log.info("%s  score=%d  %s", _flag, score, url)
@@ -509,8 +513,8 @@ class Scraper:
 
         return recorded
 
-    def _upsert_node(self, node: dict) -> None:
-        self._db.upsert_node(self._session_id, node)
+    def _upsert_node(self, node: dict, tree_col_name: str) -> None:
+        self._db.upsert_node(self._session_id, node, tree_col_name)
         if self._collection is None or isinstance(self._collection, str):
             return
         try:

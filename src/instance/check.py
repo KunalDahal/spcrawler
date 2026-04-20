@@ -146,7 +146,7 @@ def is_live_stream_iframe(src: str) -> bool:
     for pat in _LIVE_IFRAME_SRC_PATTERNS:
         if re.search(pat, path_and_query):
             log.debug("live-stream iframe pattern '%s': %s", pat, src[:80])
-            return True0
+            return True
     for kw in _LIVE_DOMAIN_KEYWORDS:
         if kw in domain:
             return True
