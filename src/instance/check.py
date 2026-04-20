@@ -55,6 +55,15 @@ _SHORT_VIDEO_DOMAINS = [
     "twitch.tv", "tiktok.com", "instagram.com",
 ]
 
+# URL substrings that indicate a stream is VOD/uploaded, not live
+_VOD_URL_SIGNALS = [
+    "upload", "uploaded", "vod", "record", "recorded", "replay",
+    "archive", "clip", "highlight", "highlights", "/video/", "/videos/",
+    "storage/", "blob.core", "s3.amazonaws.com",
+    "cdn.jwplayer.com/videos", "content.jwplatform",
+    "/mp4/", "/mp4?", "static/media",
+]
+
 
 def _path_ext(url: str) -> str:
     path = urlparse(url).path
@@ -152,3 +161,80 @@ def extract_best_live_stream(page_data: dict) -> str | None:
         if url.lower().startswith("rtmp"):
             return url
     return candidates[0]
+
+
+def is_vod_url(url: str) -> bool:
+    """Return True if a stream URL looks like a recorded/uploaded asset, not live."""
+    url_lower = url.lower()
+    for signal in _VOD_URL_SIGNALS:
+        if signal in url_lower:
+            return True
+    # Static file hosted on generic object storage with no live path markers
+    if re.search(r's3[.-][a-z0-9-]+\.amazonaws\.com', url_lower):
+        return True
+    return False
+
+
+def extract_players_with_streams(page_data: dict, max_per_player: int = 5) -> dict:
+    """
+    Group live stream URLs by player/iframe source so each player_id maps
+    to up to `max_per_player` confirmed live stream URLs.
+
+    Returns:
+        {
+          "player_0": ["https://…m3u8", …],
+          "player_1": […],
+          …
+          "page_streams": […],   # streams not tied to a specific iframe player
+        }
+    """
+    iframes      = page_data.get("iframes", [])
+    all_streams  = page_data.get("stream_urls", [])
+    network_reqs = page_data.get("network_requests", [])  # optional enrichment
+
+    result: dict[str, list[str]] = {}
+
+    # --- Per-player (iframe) bucket ---
+    live_iframes = filter_live_stream_iframes(iframes)
+    for idx, iframe_src in enumerate(live_iframes):
+        player_key = f"player_{idx}"
+        # Seeds: the iframe src itself if it's a stream URL
+        bucket: list[str] = []
+        if is_live_stream_url(iframe_src) and not is_vod_url(iframe_src):
+            bucket.append(iframe_src)
+        # Pull network requests that originate from this player domain
+        try:
+            player_domain = urlparse(iframe_src).netloc.lower()
+        except Exception:
+            player_domain = ""
+        for req in all_streams:
+            if is_vod_url(req):
+                continue
+            if not is_live_stream_url(req):
+                continue
+            if player_domain and player_domain in req.lower():
+                if req not in bucket:
+                    bucket.append(req)
+            if len(bucket) >= max_per_player:
+                break
+        if bucket:
+            result[player_key] = bucket[:max_per_player]
+
+    # --- Page-level streams not assigned to any player ---
+    assigned: set[str] = {u for bucket in result.values() for u in bucket}
+    page_bucket: list[str] = []
+    for su in all_streams:
+        if su in assigned:
+            continue
+        if is_vod_url(su):
+            continue
+        if not is_live_stream_url(su):
+            continue
+        page_bucket.append(su)
+        if len(page_bucket) >= max_per_player:
+            break
+
+    if page_bucket:
+        result["page_streams"] = page_bucket
+
+    return result

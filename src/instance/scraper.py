@@ -35,11 +35,19 @@ from ..utils.constants import (
     DEAD_END_SCORE,
     MAX_TOTAL_PAGES,
     MIN_DELAY_BETWEEN_LLM_CALLS,
+    MAX_STREAMS_PER_PLAYER,
+    AD_INTERSTITIAL_DOMAINS,
 )
 from ..client.model import get_model
 from ..client.llm import LLM
 from .proxy_manager import ProxyManager
-from .check import filter_live_stream_iframes, filter_live_stream_urls, is_live_stream_url
+from .check import (
+    filter_live_stream_iframes,
+    filter_live_stream_urls,
+    is_live_stream_url,
+    is_vod_url,
+    extract_players_with_streams,
+)
 
 _NAV_RETRIES      = 2
 _NAV_RETRY_DELAY  = 3.0
@@ -48,7 +56,7 @@ _BETWEEN_DFS_WAIT = 2.0
 
 def _multi_search(
     keyword: str,
-    on_turn: "((int, int, str, int, int) -> None) | None" = None,
+    on_turn: "((int, int, str, int, int) -> None) | None" = None
 ) -> list[dict]:
     seen:        set[str]    = set()
     all_results: list[dict]  = []
@@ -144,6 +152,7 @@ def _extract_page_data(result, url: str, keyword: str, parent_url: str | None) -
         "iframes":      iframes,
         "stream_urls":  stream_urls,
         "cdn_headers":  cdn_headers,
+        "_raw_html":    html[:30_000],   # kept for ad onclick detection; not stored in DB
         "score":        0,
         "crawled_at":   datetime.now(timezone.utc).isoformat(),
     }
@@ -221,6 +230,30 @@ def _stream_type(url: str) -> str:
     return "other"
 
 
+def _is_official_domain(url: str) -> bool:
+    """Return True if url belongs to a known official broadcaster/platform."""
+    try:
+        netloc = urlparse(url).netloc.lower()
+        for dom in OFFICIAL_DOMAINS:
+            if dom in netloc:
+                return True
+    except Exception:
+        pass
+    return False
+
+
+def _is_ad_interstitial_domain(url: str) -> bool:
+    """Return True if url is a known ad-shortener / interstitial redirect."""
+    try:
+        netloc = urlparse(url).netloc.lower()
+        for dom in AD_INTERSTITIAL_DOMAINS:
+            if dom in netloc:
+                return True
+    except Exception:
+        pass
+    return False
+
+
 class Scraper:
     def __init__(
         self,
@@ -230,11 +263,13 @@ class Scraper:
         proxy_url: str = "",
         mongo_uri: str = "mongodb://localhost:27017",
         db_name:   str = "spcrawler",
+        seed_url:  str = "",
     ) -> None:
         self.keyword      = keyword
         self._collection  = collection
         self._visited:    set[str] = set()
         self._total_pages = 0
+        self._seed_url    = seed_url
 
         self._bus = EventBus()
 
@@ -369,7 +404,32 @@ class Scraper:
                     continue
                 if depth > MAX_DEPTH:
                     continue
+
+                # Fix 1: Hard-block official broadcaster domains
+                if _is_official_domain(url):
+                    self._emit(E.CRAWL_PAGE_FAIL, {
+                        "url": url, "depth": depth,
+                        "tree_col": tree_col_name,
+                        "reason": "official_domain_blocked",
+                    })
+                    continue
+
+                # Block known ad-interstitial redirect domains
+                if _is_ad_interstitial_domain(url):
+                    self._emit(E.CRAWL_PAGE_FAIL, {
+                        "url": url, "depth": depth,
+                        "tree_col": tree_col_name,
+                        "reason": "ad_interstitial_domain_skipped",
+                    })
+                    continue
+
+                # Fix 4: Proper backtracking — treat dead_streak as node-level signal
                 if dead_streak >= MAX_DEAD_PAGES_BEFORE_BACKTRACK:
+                    self._emit(E.CRAWL_PAGE_FAIL, {
+                        "url": url, "depth": depth,
+                        "tree_col": tree_col_name,
+                        "reason": "dead_streak_backtrack",
+                    })
                     continue
 
                 self._visited.add(url)
@@ -467,6 +527,7 @@ class Scraper:
         self._emit(E.LLM_AD_CHECK, {
             "url":           url,
             "has_ad":        ad_info.get("has_ad", False),
+            "ad_type":       ad_info.get("ad_type", "none"),
             "action":        ad_info.get("action", "none"),
             "wait_seconds":  ad_info.get("wait_seconds", 0),
             "selector_hint": ad_info.get("selector_hint", ""),
@@ -478,103 +539,196 @@ class Scraper:
         wait_sec      = int(ad_info.get("wait_seconds", 0))
         selector_hint = ad_info.get("selector_hint", "")
         action        = ad_info.get("action", "none")
+        ad_type       = ad_info.get("ad_type", "none")
+        js_snippet    = ad_info.get("js_snippet", "")
 
         self._emit(E.CRAWL_AD_DETECTED, {
-            "url": url, "action": action,
+            "url": url, "ad_type": ad_type, "action": action,
             "wait_seconds": wait_sec, "selector_hint": selector_hint,
         })
 
+        # --- Wait for countdown timer ---
         if wait_sec > 0:
-            await asyncio.sleep(wait_sec + 1)
+            await asyncio.sleep(min(wait_sec + 1, 15))
 
-        if action in ("skip", "close", "wait_and_skip") and selector_hint:
-            js = f"""
-                var btns = document.querySelectorAll('button, a, [role=button]');
-                for (var b of btns) {{
-                    if (b.innerText && b.innerText.toLowerCase().includes(
-                            '{selector_hint.lower()}')) {{
-                        b.click(); break;
-                    }}
-                }}
+        # --- Build JS to dismiss the ad ---
+        if action == "click_through" or ad_type == "onclick_redirect":
+            # Block popup windows then click through the player area
+            dismiss_js = """
+                // Block popup/redirect ads triggered by onclick
+                window._origOpen = window.open;
+                window.open = function() { return null; };
+                // Remove onclick from known ad containers
+                var adContainers = document.querySelectorAll(
+                    '[id*=ad],[class*=ad],[id*=overlay],[class*=overlay]'
+                );
+                adContainers.forEach(function(el) {
+                    el.removeAttribute('onclick');
+                    el.style.display = 'none';
+                });
+                // Click through to the real player
+                var player = document.querySelector(
+                    'video, iframe[src*=stream], iframe[src*=embed], '
+                    + 'iframe[src*=player], [id*=player], [class*=player]'
+                );
+                if (player) { player.click(); }
             """
+        elif action in ("skip", "close", "wait_and_skip"):
+            # Build selector-based click JS; also try common skip patterns
+            hint_lower = selector_hint.lower().replace('"', '\\"')
+            dismiss_js = f"""
+                // Try LLM-provided selector hint
+                var found = false;
+                var selectors = [
+                    '[id*=skip],[class*=skip]',
+                    '[id*=close],[class*=close]',
+                    '.skip-btn,.skip-button,.skipbtn,.ad-skip',
+                    '.closeBtn,.close-btn,[aria-label*=close],[aria-label*=skip]',
+                    'button,a,[role=button]'
+                ];
+                for (var s of selectors) {{
+                    var els = document.querySelectorAll(s);
+                    for (var el of els) {{
+                        var txt = (el.innerText || el.textContent || '').toLowerCase();
+                        if (txt.includes('{hint_lower}') || txt.includes('skip')
+                                || txt.includes('close') || txt.includes('continue')) {{
+                            el.click();
+                            found = true;
+                            break;
+                        }}
+                    }}
+                    if (found) break;
+                }}
+                // Also hide common overlay containers
+                var overlays = document.querySelectorAll(
+                    '.overlay,.modal,.popup,.ad-overlay,[id*=overlay],[class*=popup]'
+                );
+                overlays.forEach(function(el) {{ el.style.display = 'none'; }});
+            """
+        elif js_snippet:
+            dismiss_js = js_snippet
+        else:
+            dismiss_js = ""
+
+        if dismiss_js:
             try:
                 skip_cfg = CrawlerRunConfig(
                     cache_mode   = CacheMode.BYPASS,
-                    js_code      = js,
+                    js_code      = dismiss_js,
                     page_timeout = REQUEST_TIMEOUT_MS,
                     verbose      = False,
+                    wait_until   = "domcontentloaded",
+                    capture_network_requests = True,
                 )
-                await asyncio.wait_for(
+                result = await asyncio.wait_for(
                     crawler.arun(url=url, config=skip_cfg),
                     timeout=CRAWL_TIMEOUT_SEC,
                 )
                 self._emit(E.CRAWL_AD_HANDLED, {
-                    "url": url, "selector_hint": selector_hint, "success": True,
+                    "url": url, "ad_type": ad_type,
+                    "selector_hint": selector_hint, "success": result.success,
                 })
+                # Merge any newly captured network requests / stream urls into page_data
+                if result.success and result.network_requests:
+                    existing = set(page_data.get("stream_urls", []))
+                    for req in result.network_requests:
+                        req_url = req.get("url", "")
+                        if (req_url not in existing and
+                                any(x in req_url for x in
+                                    (".m3u8", ".ts?", "/hls/", "/live/", "rtmp://"))):
+                            page_data.setdefault("stream_urls", []).append(req_url)
+                            existing.add(req_url)
             except Exception as exc:
                 self._emit(E.CRAWL_AD_HANDLED, {
-                    "url": url, "selector_hint": selector_hint,
+                    "url": url, "ad_type": ad_type,
+                    "selector_hint": selector_hint,
                     "success": False, "error": str(exc),
                 })
 
     async def _collect_streams(self, page_data: dict, score: int) -> bool:
+        """
+        Collect up to MAX_STREAMS_PER_PLAYER live stream URLs per player/iframe
+        found on the page.  VOD/uploaded streams are rejected before LLM verification.
+        Returns True if at least one stream was recorded.
+        """
         recorded = False
         source   = page_data["url"]
         context  = page_data.get("text_snippet", "")
 
-        candidates: list[str] = []
-        candidates += filter_live_stream_urls(page_data.get("stream_urls", []))
-        candidates += [
-            src for src in filter_live_stream_iframes(page_data.get("iframes", []))
-            if is_live_stream_url(src)
-        ]
+        # Fix 3: group streams by player
+        player_map = extract_players_with_streams(page_data, max_per_player=MAX_STREAMS_PER_PLAYER)
 
-        for stream_url in dict.fromkeys(candidates):
-            is_live = await self._llm_call(self._llm.verify_live, stream_url, context)
+        if not player_map:
+            return False
 
-            self._emit(E.LLM_VERIFY_LIVE, {
-                "stream_url": stream_url,
-                "source_url": source,
-                "is_live":    is_live,
-            })
+        for player_id, candidates in player_map.items():
+            player_recorded: list[str] = []
+            for stream_url in candidates:
+                if len(player_recorded) >= MAX_STREAMS_PER_PLAYER:
+                    break
 
-            if not is_live:
-                self._emit(E.STREAM_REJECTED, {
+                # Fix 2: reject VOD/uploaded streams before LLM call
+                if is_vod_url(stream_url):
+                    self._emit(E.STREAM_REJECTED, {
+                        "stream_url": stream_url,
+                        "source_url": source,
+                        "player_id":  player_id,
+                        "reason":     "vod_url_pattern",
+                    })
+                    continue
+
+                is_live = await self._llm_call(self._llm.verify_live, stream_url, context)
+
+                self._emit(E.LLM_VERIFY_LIVE, {
                     "stream_url": stream_url,
                     "source_url": source,
-                    "reason":     "llm_rejected",
+                    "player_id":  player_id,
+                    "is_live":    is_live,
                 })
-                continue
 
-            stype  = _stream_type(stream_url)
-            doc_id = self._db.record_stream(
-                session_id  = self._session_id,
-                stream_url  = stream_url,
-                source_url  = source,
-                keyword     = self.keyword,
-                stream_type = stype,
-                score       = score,
-            )
-            if doc_id:
-                self._emit(E.STREAM_FOUND, {
-                    "stream_url":  stream_url,
-                    "source_url":  source,
-                    "stream_type": stype,
-                    "score":       score,
-                    "doc_id":      doc_id,
-                })
-                recorded = True
+                if not is_live:
+                    self._emit(E.STREAM_REJECTED, {
+                        "stream_url": stream_url,
+                        "source_url": source,
+                        "player_id":  player_id,
+                        "reason":     "llm_rejected",
+                    })
+                    continue
+
+                stype  = _stream_type(stream_url)
+                doc_id = self._db.record_stream(
+                    session_id  = self._session_id,
+                    stream_url  = stream_url,
+                    source_url  = source,
+                    keyword     = self.keyword,
+                    stream_type = stype,
+                    score       = score,
+                    player_id   = player_id,
+                )
+                if doc_id:
+                    player_recorded.append(stream_url)
+                    self._emit(E.STREAM_FOUND, {
+                        "stream_url":  stream_url,
+                        "source_url":  source,
+                        "stream_type": stype,
+                        "score":       score,
+                        "player_id":   player_id,
+                        "doc_id":      doc_id,
+                    })
+                    recorded = True
 
         return recorded
 
     def _upsert_node(self, node: dict, tree_col_name: str) -> None:
-        self._db.upsert_node(self._session_id, node, tree_col_name)
+        # Don't persist the raw HTML blob — it's only needed in-memory for ad detection
+        db_node = {k: v for k, v in node.items() if k != "_raw_html"}
+        self._db.upsert_node(self._session_id, db_node, tree_col_name)
         if self._collection is None or isinstance(self._collection, str):
             return
         try:
             self._collection.replace_one(
                 {"url": node["url"], "session_id": self._session_id},
-                {**node, "session_id": self._session_id},
+                {**db_node, "session_id": self._session_id},
                 upsert=True,
             )
         except Exception as exc:

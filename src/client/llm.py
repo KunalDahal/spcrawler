@@ -73,26 +73,55 @@ class LLM:
 
     def check_ads(self, page_data: dict) -> dict:
         snippet = (page_data.get("text_snippet") or "")[:600]
+        html    = page_data.get("_raw_html", "")  # optional raw HTML if available
+
         buttons = re.findall(
-            r'\b(skip|close|continue|proceed|dismiss|allow|accept)\b',
+            r'\b(skip|close|continue|proceed|dismiss|allow|accept|skip\s*ad|'
+            r'skip\s*now|skip\s*in|watch\s*now|click\s*here|proceed)\b',
             snippet, re.IGNORECASE,
         )
+
+        # Detect onclick redirect signals in raw HTML
+        onclicks: list[str] = []
+        if html:
+            onclicks = list(dict.fromkeys(
+                re.findall(r'onclick=["\'][^"\']{0,120}["\']', html, re.IGNORECASE)
+            ))[:5]
+
+        # Detect ad-network redirect URLs
+        redirects: list[str] = []
+        if html:
+            redirect_domains = [
+                "adf.ly", "ouo.io", "linkvertise", "sh.st", "bc.vc",
+                "gestyy", "shorte.st", "zipansion", "cpmlink",
+            ]
+            for dom in redirect_domains:
+                if dom in html.lower():
+                    redirects.append(dom)
+
         payload = prompts.AD_CHECK_USER.format(
-            title   = page_data.get("title", ""),
-            snippet = snippet[:400],
-            buttons = list(dict.fromkeys(b.lower() for b in buttons)),
+            title     = page_data.get("title", ""),
+            snippet   = snippet[:400],
+            buttons   = list(dict.fromkeys(b.lower() for b in buttons)),
+            redirects = redirects,
+            onclicks  = onclicks[:3],
         )
         try:
             raw   = self._model.call(prompts.AD_CHECK_SYSTEM, payload).strip()
             clean = re.sub(r"```[a-z]*|```", "", raw).strip()
             data  = json.loads(clean)
             data.setdefault("has_ad", False)
+            data.setdefault("ad_type", "none")
             data.setdefault("action", "none")
             data.setdefault("wait_seconds", 0)
             data.setdefault("selector_hint", "")
+            data.setdefault("js_snippet", "")
             return data
         except Exception:
-            return {"has_ad": False, "action": "none", "wait_seconds": 0, "selector_hint": ""}
+            return {
+                "has_ad": False, "ad_type": "none", "action": "none",
+                "wait_seconds": 0, "selector_hint": "", "js_snippet": "",
+            }
 
     def verify_live(self, url: str, context: str = "") -> bool:
         payload = f"URL: {url}\nContext: {context[:300]}"

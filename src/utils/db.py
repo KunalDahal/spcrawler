@@ -246,6 +246,7 @@ class Database:
         keyword:     str,
         stream_type: str = "unknown",
         score:       int = 0,
+        player_id:   str = "page_streams",
     ) -> str:
         from ..events import E
 
@@ -255,6 +256,10 @@ class Database:
             unique     = True,
             background = True,
         )
+        col.create_index(
+            [("session_id", 1), ("source_url", 1), ("player_id", 1)],
+            background = True,
+        )
         doc = {
             "session_id":    session_id,
             "keyword":       keyword,
@@ -262,6 +267,7 @@ class Database:
             "source_url":    source_url,
             "stream_type":   stream_type,
             "score":         score,
+            "player_id":     player_id,
             "discovered_at": self._now(),
         }
         doc_id = ""
@@ -286,10 +292,35 @@ class Database:
                 "source_url":  source_url,
                 "stream_type": stream_type,
                 "score":       score,
+                "player_id":   player_id,
                 "doc_id":      doc_id,
             })
 
         return doc_id
+
+    def get_streams_by_player(self, session_id: str) -> dict:
+        """
+        Return streams grouped by source page and player_id:
+        {
+          "https://source-page.com/watch": {
+            "player_0": ["url1", "url2", ...],
+            "player_1": [...],
+            "page_streams": [...],
+          },
+          ...
+        }
+        """
+        raw = list(
+            self._db["streams"]
+            .find({"session_id": session_id}, {"_id": 0})
+            .sort("discovered_at", DESCENDING)
+        )
+        grouped: dict = {}
+        for doc in raw:
+            src = doc.get("source_url", "unknown")
+            pid = doc.get("player_id", "page_streams")
+            grouped.setdefault(src, {}).setdefault(pid, []).append(doc["stream_url"])
+        return grouped
 
     def get_streams(self, session_id: str) -> list[dict]:
         return list(

@@ -74,3 +74,29 @@ SUSPICIOUS_DOMAIN_WORDS = [
 ]
 
 CDN_HEADERS = ["server", "x-powered-by", "via", "x-cache", "cf-ray", "x-served-by"]
+
+# Signals that a .m3u8 / stream URL is VOD/recorded, NOT live
+VOD_URL_SIGNALS = [
+    "upload", "uploaded", "vod", "record", "recorded", "replay",
+    "archive", "clip", "highlight", "highlights", "video/",
+    "videos/", "storage/", "blob.core", "s3.amazonaws.com",
+    "cdn.jwplayer.com/videos", "content.jwplatform",
+    "/mp4/", "/mp4?", ".mp4", "static/media",
+]
+
+# Max stream URLs to collect per player iframe / player container
+MAX_STREAMS_PER_PLAYER = 5
+
+# JS snippets to detect common ad overlay patterns
+AD_OVERLAY_JS_CHECKS = [
+    # generic "Skip Ad" / "Skip Now" countdown buttons
+    "document.querySelector('[id*=skip],[class*=skip],[id*=ad-skip],[class*=ad-skip]')",
+    "document.querySelector('.skip-btn,.skip-button,.skipbtn,.ad-skip,.closeBtn')",
+]
+
+# Interstitial redirect ad domains (navigate away from these immediately)
+AD_INTERSTITIAL_DOMAINS = [
+    "adf.ly", "ouo.io", "linkvertise.com", "sh.st", "bc.vc",
+    "gestyy.com", "shorte.st", "za.gl", "fc.lc",
+    "adshorten.com", "cpmlink.net", "zipansion.com",
+]

@@ -169,7 +169,7 @@ async def event_handler(event: Event) -> None:
 
 async def main() -> None:
     scraper = Scraper(
-        keyword   = "RR vs KKR watch free live",
+        keyword   = "NewZealand Vs Bangladesh odi",
         api_key   = API_KEY,
         db_name   = DB_NAME,
         mongo_uri = MONGO_URI,

@@ -67,39 +67,64 @@ Return ONLY a single integer 0-100. No text, no punctuation.
 """
 
 AD_CHECK_SYSTEM = """\
-You are reviewing a webpage for interstitial ads, overlays, or "Skip" buttons
-that block access to the underlying video player.
+You are reviewing a webpage for interstitial ads, overlays, redirect ads, or
+countdown "Skip" buttons that block access to the underlying video player.
 
-Given the page title, text snippet, and a list of visible button/link texts,
-decide whether there is an ad overlay or countdown that needs to be dismissed.
+Piracy streaming sites use these ad patterns:
+1. Full-page countdown timer ("Your stream starts in 5...") with a Skip/Continue button
+2. Overlay banners with Close (x) or "Skip Ad" buttons
+3. onclick redirect: clicking the player area opens an ad tab first
+4. "Please disable your adblocker" gates
+5. Auto-redirect to an ad-network URL (adf.ly, ouo.io, linkvertise, etc.)
+6. Interstitial page between the link and the stream player
+
+Given the page title, text snippet, visible button/link texts, redirect signals,
+and onclick attributes, decide whether an ad or interstitial must be dismissed.
 
 Return a JSON object -- nothing else:
 {
   "has_ad": true | false,
-  "action": "skip" | "close" | "wait_and_skip" | "none",
+  "ad_type": "countdown" | "overlay" | "onclick_redirect" | "adblock_gate" | "interstitial" | "none",
+  "action": "skip" | "close" | "wait_and_skip" | "click_through" | "none",
   "wait_seconds": 0,
-  "selector_hint": "<text>"
+  "selector_hint": "<button label or CSS selector hint>",
+  "js_snippet": "<optional JS to execute to dismiss, or empty string>"
 }
+
+For onclick redirect ads set action=click_through and js_snippet to JS that
+blocks window.open/popups then clicks the real player container.
+For countdown timers set wait_seconds to the countdown value and action=wait_and_skip.
 """
 
 AD_CHECK_USER = """\
 Title  : {title}
 Snippet: {snippet}
 Button texts visible: {buttons}
+Redirect signals: {redirects}
+Onclick attributes present: {onclicks}
 """
 
 VERIFY_LIVE_SYSTEM = """\
-Determine whether the given URL is a LIVE stream or a static / VOD asset.
+Determine whether the given URL is a CURRENTLY LIVE broadcast stream or a
+static / VOD / pre-recorded asset.
 
-LIVE if:
-- HLS manifest (.m3u8) that refreshes segments continuously
-- RTMP / acestream / sopcast scheme (inherently live)
-- Context contains "live now", "watch live", "on air", "live score"
+LIVE (reply LIVE) if ALL of the following hold:
+- HLS manifest (.m3u8) served by a CDN/broadcast origin that refreshes
+  segments in real-time (NOT a fixed-duration VOD file)
+- OR RTMP / acestream / sopcast scheme (inherently live)
+- AND the URL does NOT contain: upload, uploaded, vod, record, recorded,
+  replay, archive, clip, highlight, s3.amazonaws.com, blob.core,
+  jwplatform, /videos/, /mp4/, static/media
+- AND context signals "live now", "watch live", "on air", "live score",
+  or no explicit duration/timestamp markers
 
-NOT LIVE if:
-- Static .mp4 / .webm / .ogg file
-- YouTube / Vimeo / Dailymotion link
-- Context says "highlights", "replay", "full match recorded"
+NOT LIVE (reply NOT_LIVE) if ANY of:
+- URL contains: upload, vod, record, replay, archive, clip, highlight,
+  s3.amazonaws, blob.core, jwplatform, /videos/, /mp4/, static/media
+- Static .mp4 / .webm / .ogg / fixed-size file
+- YouTube / Vimeo / Dailymotion / TikTok link
+- Context says "highlights", "replay", "full match recorded", "watch again"
+- URL has an explicit video ID pattern typical of CMS uploads
 
 Reply ONLY with "LIVE" or "NOT_LIVE". No other text.
 """
