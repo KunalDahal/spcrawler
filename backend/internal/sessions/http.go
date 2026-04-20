@@ -51,7 +51,11 @@ func RegisterHandlers(mux *http.ServeMux, manager *Manager) {
 			case http.MethodGet:
 				writeJSON(w, http.StatusOK, session.Summary())
 			case http.MethodDelete:
-				manager.Stop(id)
+				if r.URL.Query().Get("drop_db") == "true" {
+					manager.StopWithDropDB(id)
+				} else {
+					manager.Stop(id)
+				}
 				writeJSON(w, http.StatusOK, map[string]string{"status": "stopping"})
 			default:
 				w.WriteHeader(http.StatusMethodNotAllowed)

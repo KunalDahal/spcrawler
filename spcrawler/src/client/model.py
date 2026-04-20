@@ -20,8 +20,8 @@ from ..utils.constants import (
 
 _BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 
-_cached_model: "Model | None" = None
-_model_lock   = threading.Lock()
+_model_cache: dict[str, "Model"] = {}
+_model_lock  = threading.Lock()
 
 Emitter = Callable[[str, dict], None]
 
@@ -31,11 +31,11 @@ def _noop(event_type: str, data: dict) -> None:
 
 
 def get_model(cfg: Config, emit: Emitter = _noop) -> "Model":
-    global _cached_model
     with _model_lock:
-        if _cached_model is None:
-            _cached_model = Model(cfg, emit)
-        return _cached_model
+        key = cfg.api_key
+        if key not in _model_cache:
+            _model_cache[key] = Model(cfg, emit)
+        return _model_cache[key]
 
 
 class Model:

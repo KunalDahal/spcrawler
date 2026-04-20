@@ -21,6 +21,7 @@ class E:
     LLM_SCORE         = "llm.score"
     LLM_VERIFY_LIVE   = "llm.verify_live"
     LLM_AD_CHECK      = "llm.ad_check"
+    LLM_CLASSIFY      = "llm.classify"
 
     CRAWL_TREE_START  = "crawl.tree_start"
     CRAWL_TREE_DONE   = "crawl.tree_done"

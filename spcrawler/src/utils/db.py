@@ -73,19 +73,23 @@ class Database:
             self._indexed_col(col_name).replace_one(
                 {"url": url},
                 {
-                    "url":          url,
-                    "depth":        0,
-                    "parent_url":   None,
-                    "keyword":      "",
-                    "title":        "",
-                    "text_snippet": "",
-                    "links_found":  [],
-                    "iframes":      [],
-                    "stream_urls":  [],
-                    "cdn_headers":  {},
-                    "score":        0,
-                    "crawled_at":   None,
-                    "status":       "pending",
+                    "url":            url,
+                    "depth":          0,
+                    "parent_url":     None,
+                    "keyword":        "",
+                    "title":          "",
+                    "text_snippet":   "",
+                    "links_found":    [],
+                    "iframes":        [],
+                    "stream_urls":    [],
+                    "cdn_headers":    {},
+                    "score":          0,
+                    "crawled_at":     None,
+                    "status":         "pending",
+                    "is_ad_page":     False,
+                    "is_player_page": False,
+                    "is_official":    False,
+                    "is_suspicious":  False,
                 },
                 upsert=True,
             )
@@ -158,6 +162,11 @@ class Database:
         from ..events import E
 
         node.setdefault("status", "crawled")
+        node.setdefault("is_ad_page", False)
+        node.setdefault("is_player_page", False)
+        node.setdefault("is_official", False)
+        node.setdefault("is_suspicious", False)
+
         self._indexed_col(tree_col_name).replace_one(
             {"url": node["url"]},
             node,
@@ -166,14 +175,17 @@ class Database:
         self._refresh_session_stats(session_id)
 
         self._emit(session_id, E.DB_NODE_UPSERTED, {
-            "url":         node.get("url"),
-            "depth":       node.get("depth", 0),
-            "score":       node.get("score", 0),
-            "title":       node.get("title", ""),
-            "tree_col":    tree_col_name,
-            "stream_urls": node.get("stream_urls", []),
-            "iframes":     node.get("iframes", []),
-            "links_found": len(node.get("links_found", [])),
+            "url":            node.get("url"),
+            "depth":          node.get("depth", 0),
+            "score":          node.get("score", 0),
+            "title":          node.get("title", ""),
+            "tree_col":       tree_col_name,
+            "stream_urls":    node.get("stream_urls", []),
+            "iframes":        node.get("iframes", []),
+            "links_found":    len(node.get("links_found", [])),
+            "is_player_page": node.get("is_player_page", False),
+            "is_ad_page":     node.get("is_ad_page", False),
+            "parent_url":     node.get("parent_url"),
         })
 
     def _refresh_session_stats(self, session_id: str) -> None:
@@ -299,17 +311,6 @@ class Database:
         return doc_id
 
     def get_streams_by_player(self, session_id: str) -> dict:
-        """
-        Return streams grouped by source page and player_id:
-        {
-          "https://source-page.com/watch": {
-            "player_0": ["url1", "url2", ...],
-            "player_1": [...],
-            "page_streams": [...],
-          },
-          ...
-        }
-        """
         raw = list(
             self._db["streams"]
             .find({"session_id": session_id}, {"_id": 0})

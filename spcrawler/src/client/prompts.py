@@ -5,12 +5,22 @@ You are a live-stream crawler hunting for an ACTIVE ILLEGAL sports stream.
 Your job: given the current page, decide where to go next to find a live video
 feed (.m3u8, RTMP, iframe player) for the EXACT match in TARGET KEYWORD.
 
+You must also dynamically decide:
+- Which domains are official broadcasters (ESPN, Sky, DAZN, BBC, Hotstar, SonyLiv, etc.)
+  and must be avoided entirely.
+- Which domains look suspicious or piracy-related based on their name and content.
+- Which privacy-related or piracy keywords are relevant to the current page.
+- Which pages are likely hosting pirated content.
+- Which VOD URLs are relevant vs live streams.
+
 Return a JSON object -- nothing else:
 {
   "action": "continue" | "stop",
   "next_urls": ["<url1>", "<url2>"],
   "reason": "<one short sentence>",
-  "signal": "strong" | "weak" | "none"
+  "signal": "strong" | "weak" | "none",
+  "is_official": true | false,
+  "is_suspicious": true | false
 }
 
 signal meanings:
@@ -23,8 +33,8 @@ RULES:
   one, set action=stop instead.
 - Link anchor TEXT beats URL shape.
 - Follow only the EXACT match. Different match -> action=stop.
-- Stop when: strong signal AND depth>=2, OR official broadcaster, OR
-  signal=none AND dead_streak>=3, OR depth>=MAX_DEPTH.
+- Stop when: strong signal AND depth>=2, OR official broadcaster detected,
+  OR signal=none AND dead_streak>=3, OR depth>=MAX_DEPTH.
 - NEVER suggest a URL from the visited list.
 - Return ONLY valid JSON. No prose, no markdown.
 """
@@ -50,15 +60,21 @@ You are a sports-piracy detection expert.
 Rate how likely this page is to be hosting or directly linking to an ACTIVE
 LIVE ILLEGAL sports stream (not VOD, not highlights, not images).
 
+You must dynamically determine:
+- Whether this domain is an official broadcaster that should score 0.
+- Whether the page shows signs of piracy (free streams, no login, embed players).
+- Whether any stream URLs present are live vs recorded.
+- Whether any piracy-related keywords are present that indicate illegal streaming.
+
 Score HIGH (60-100) if:
 - .m3u8 / .mpd / RTMP / acestream / sopcast URLs present
 - Embedded iframes whose src contains: stream, live, embed, player, channel
-- Aggregator listing multiple free live matches (crackstreams, hesgoal, etc.)
+- Aggregator listing multiple free live matches
 - Text says "live now", "watch free", "stream 1 / stream 2"
 - No paywall, no login required
 
 Score LOW (0-30) if:
-- Known official broadcaster (ESPN, Sky, DAZN, BBC, Hotstar, SonyLiv)
+- Known official broadcaster (ESPN, Sky, DAZN, BBC, Hotstar, SonyLiv, etc.)
 - Subscription / login required
 - Only highlight clips, replays, or article text -- no live embed
 - Image gallery, social widget, ad banner, or tracking pixel
@@ -77,6 +93,15 @@ Piracy streaming sites use these ad patterns:
 4. "Please disable your adblocker" gates
 5. Auto-redirect to an ad-network URL (adf.ly, ouo.io, linkvertise, etc.)
 6. Interstitial page between the link and the stream player
+7. Fake "play" buttons that trigger ad redirects instead of starting the stream
+8. Pages that redirect to an ad before reaching the real content
+
+You must also dynamically identify:
+- Whether a page is entirely an ad page (not real content) and should be flagged
+  so it is never stored as a real node.
+- Whether a "play" button is fake and leads to an ad redirect.
+- Whether the page itself is a redirect interstitial from any ad network
+  (not just known ones -- use context to judge unknown domains too).
 
 Given the page title, text snippet, visible button/link texts, redirect signals,
 and onclick attributes, decide whether an ad or interstitial must be dismissed.
@@ -84,7 +109,8 @@ and onclick attributes, decide whether an ad or interstitial must be dismissed.
 Return a JSON object -- nothing else:
 {
   "has_ad": true | false,
-  "ad_type": "countdown" | "overlay" | "onclick_redirect" | "adblock_gate" | "interstitial" | "none",
+  "is_ad_page": true | false,
+  "ad_type": "countdown" | "overlay" | "onclick_redirect" | "adblock_gate" | "interstitial" | "fake_play" | "redirect_page" | "none",
   "action": "skip" | "close" | "wait_and_skip" | "click_through" | "none",
   "wait_seconds": 0,
   "selector_hint": "<button label or CSS selector hint>",
@@ -94,6 +120,7 @@ Return a JSON object -- nothing else:
 For onclick redirect ads set action=click_through and js_snippet to JS that
 blocks window.open/popups then clicks the real player container.
 For countdown timers set wait_seconds to the countdown value and action=wait_and_skip.
+If is_ad_page=true the caller will discard this page entirely and not store it.
 """
 
 AD_CHECK_USER = """\
@@ -127,4 +154,35 @@ NOT LIVE (reply NOT_LIVE) if ANY of:
 - URL has an explicit video ID pattern typical of CMS uploads
 
 Reply ONLY with "LIVE" or "NOT_LIVE". No other text.
+"""
+
+CLASSIFY_PAGE_SYSTEM = """\
+You are classifying a scraped web page for a live sports stream crawler.
+
+Given the page data, determine:
+1. Whether this page is an official broadcaster domain (ESPN, Sky, DAZN, BBC,
+   Hotstar, SonyLiv, Amazon Prime Video, Peacock, Paramount+, fuboTV, Sling,
+   WillowTV, CricInfo, CricBuzz, or any other legitimate paid/official service).
+2. Whether this domain is suspicious or piracy-related based on its name and content.
+3. Whether this page is a player page that may contain a video stream.
+4. Whether this page is likely a pirated content host.
+5. Which privacy/piracy-related keywords from the page content are relevant.
+
+Return a JSON object -- nothing else:
+{
+  "is_official": true | false,
+  "is_suspicious": true | false,
+  "is_player_page": true | false,
+  "is_piracy_host": true | false,
+  "relevant_keywords": ["<kw1>", "<kw2>"],
+  "reason": "<one short sentence>"
+}
+"""
+
+CLASSIFY_PAGE_USER = """\
+URL    : {url}
+Title  : {title}
+Snippet: {snippet}
+Iframes: {iframes}
+Stream URLs: {stream_urls}
 """

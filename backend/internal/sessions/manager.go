@@ -9,6 +9,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -54,6 +56,7 @@ type Summary struct {
 type Session struct {
 	mu          sync.RWMutex
 	summary     Summary
+	config      StartRequest // retained so Stop can drop the DB if requested
 	events      []Event
 	subscribers map[chan Event]struct{}
 	cancel      context.CancelFunc
@@ -63,6 +66,9 @@ type Session struct {
 type Manager struct {
 	mu       sync.RWMutex
 	sessions map[string]*Session
+	venvMu     sync.Mutex
+	venvPython string
+	venvErr    error 
 }
 
 func NewManager() *Manager {
@@ -81,6 +87,12 @@ func (m *Manager) Start(req StartRequest) (*Summary, error) {
 		req.MongoURI = "mongodb://localhost:27017"
 	}
 
+	// Ensure the virtual environment is ready before we accept the session.
+	python, err := m.resolveVenvPython()
+	if err != nil {
+		return nil, fmt.Errorf("python venv setup failed: %w", err)
+	}
+
 	id := newID()
 	ctx, cancel := context.WithCancel(context.Background())
 	s := &Session{
@@ -90,6 +102,7 @@ func (m *Manager) Start(req StartRequest) (*Summary, error) {
 			Status:    "starting",
 			StartedAt: time.Now().UTC(),
 		},
+		config:      req,
 		subscribers: map[chan Event]struct{}{},
 		cancel:      cancel,
 	}
@@ -98,7 +111,7 @@ func (m *Manager) Start(req StartRequest) (*Summary, error) {
 	m.sessions[id] = s
 	m.mu.Unlock()
 
-	if err := s.launch(ctx, req); err != nil {
+	if err := s.launch(ctx, req, python); err != nil {
 		m.mu.Lock()
 		delete(m.sessions, id)
 		m.mu.Unlock()
@@ -137,6 +150,50 @@ func (m *Manager) Stop(id string) bool {
 	return true
 }
 
+// StopWithDropDB stops the session and then drops its MongoDB database using
+// the same venv Python that runs the scraper (no extra Go dependency needed).
+func (m *Manager) StopWithDropDB(id string) bool {
+	s, ok := m.Get(id)
+	if !ok {
+		return false
+	}
+
+	s.mu.RLock()
+	cfg := s.config
+	s.mu.RUnlock()
+
+	s.Stop()
+
+	go m.dropDatabase(cfg)
+	return true
+}
+
+func (m *Manager) dropDatabase(cfg StartRequest) {
+	m.venvMu.Lock()
+	python := m.venvPython
+	m.venvMu.Unlock()
+
+	if python == "" {
+		log.Printf("spcrawler: drop_db skipped – venv python not ready")
+		return
+	}
+	if cfg.MongoURI == "" || cfg.DBName == "" {
+		log.Printf("spcrawler: drop_db skipped – missing MongoURI or DBName")
+		return
+	}
+
+	script := fmt.Sprintf(
+		"import pymongo; pymongo.MongoClient(%q).drop_database(%q)",
+		cfg.MongoURI, cfg.DBName,
+	)
+	out, err := runCmd(python, "-c", script)
+	if err != nil {
+		log.Printf("spcrawler: drop_db failed for %q: %v\n%s", cfg.DBName, err, out)
+		return
+	}
+	log.Printf("spcrawler: dropped database %q on %s", cfg.DBName, cfg.MongoURI)
+}
+
 func (m *Manager) Shutdown() {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -145,15 +202,105 @@ func (m *Manager) Shutdown() {
 	}
 }
 
-func (s *Session) launch(ctx context.Context, req StartRequest) error {
+func (m *Manager) resolveVenvPython() (string, error) {
+	m.venvMu.Lock()
+	defer m.venvMu.Unlock()
+
+	if m.venvPython != "" {
+		return m.venvPython, nil
+	}
+	if m.venvErr != nil {
+		return "", m.venvErr 
+	}
+
+	python, err := ensureVenv()
+	if err != nil {
+		m.venvErr = err
+		return "", err
+	}
+	m.venvPython = python
+	return python, nil
+}
+
+func ensureVenv() (string, error) {
+	scriptPath, err := runnerPath()
+	if err != nil {
+		return "", err
+	}
+	scriptsDir := filepath.Dir(scriptPath)
+
+	venvDir := filepath.Join(scriptsDir, ".venv")
+	pythonBin := venvPythonBin(venvDir)
+
+	if _, statErr := os.Stat(pythonBin); statErr == nil {
+		log.Printf("spcrawler: reusing existing venv at %s", venvDir)
+		return pythonBin, nil
+	}
+
+	sysPython, err := findSystemPython()
+	if err != nil {
+		return "", fmt.Errorf("no usable Python found: %w", err)
+	}
+	log.Printf("spcrawler: creating venv at %s using %s", venvDir, sysPython)
+
+	if out, runErr := runCmd(sysPython, "-m", "venv", venvDir); runErr != nil {
+		return "", fmt.Errorf("venv creation failed: %w\n%s", runErr, out)
+	}
+	log.Printf("spcrawler: venv created")
+
+	if out, runErr := runCmd(pythonBin, "-m", "pip", "install", "--quiet", "--upgrade", "pip"); runErr != nil {
+		log.Printf("spcrawler: pip upgrade warning: %s", out)
+	}
+
+	reqFile := filepath.Join(scriptsDir, "requirements.txt")
+	if _, statErr := os.Stat(reqFile); statErr == nil {
+		log.Printf("spcrawler: installing %s", reqFile)
+		out, runErr := runCmd(pythonBin, "-m", "pip", "install", "--quiet", "-r", reqFile)
+		if runErr != nil {
+			return "", fmt.Errorf("pip install failed: %w\n%s", runErr, out)
+		}
+		log.Printf("spcrawler: requirements installed")
+	} else {
+		log.Printf("spcrawler: no requirements.txt found at %s – skipping pip install", reqFile)
+	}
+
+	return pythonBin, nil
+}
+
+func venvPythonBin(venvDir string) string {
+	if runtime.GOOS == "windows" {
+		return filepath.Join(venvDir, "Scripts", "python.exe")
+	}
+	return filepath.Join(venvDir, "bin", "python")
+}
+
+func findSystemPython() (string, error) {
+	candidates := []string{"python3", "python"}
+	for _, name := range candidates {
+		path, err := exec.LookPath(name)
+		if err != nil {
+			continue
+		}
+		out, err := exec.Command(path, "-c", "import sys; assert sys.version_info >= (3,8)").CombinedOutput()
+		if err != nil {
+			log.Printf("spcrawler: skipping %s – %s", path, strings.TrimSpace(string(out)))
+			continue
+		}
+		return path, nil
+	}
+	return "", errors.New("python3 (>=3.8) not found on PATH")
+}
+
+func runCmd(name string, args ...string) (string, error) {
+	cmd := exec.Command(name, args...)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func (s *Session) launch(ctx context.Context, req StartRequest, python string) error {
 	script, err := runnerPath()
 	if err != nil {
 		return err
-	}
-
-	python := "python"
-	if runtime.GOOS != "windows" {
-		python = "python3"
 	}
 
 	cmd := exec.CommandContext(ctx, python, "-u", script)
@@ -320,7 +467,7 @@ func (s *Session) applyEventLocked(event Event) {
 		s.summary.SearchResults = intFrom(data["total_results"], s.summary.SearchResults)
 	case "search.candidates":
 		s.summary.CandidatesRegistered = intFrom(data["total"], s.summary.CandidatesRegistered)
-	case "crawl.page_start", "crawl.page_done", "crawl.page_fail", "llm.navigate":
+	case "crawl.page_start", "crawl.page_done", "crawl.page_fail", "llm.navigate", "llm.classify":
 		if url, ok := data["url"].(string); ok {
 			s.summary.CurrentURL = url
 		}

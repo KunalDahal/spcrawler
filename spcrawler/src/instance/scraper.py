@@ -28,15 +28,11 @@ from ..utils.constants import (
     TARGET_STREAM_SCHEMES,
     TARGET_HLS_PATTERNS,
     CDN_HEADERS,
-    OFFICIAL_DOMAINS,
-    PIRACY_KEYWORDS,
-    SUSPICIOUS_DOMAIN_WORDS,
     MAX_DEAD_PAGES_BEFORE_BACKTRACK,
     DEAD_END_SCORE,
     MAX_TOTAL_PAGES,
     MIN_DELAY_BETWEEN_LLM_CALLS,
     MAX_STREAMS_PER_PLAYER,
-    AD_INTERSTITIAL_DOMAINS,
 )
 from ..client.model import get_model
 from ..client.llm import LLM
@@ -56,10 +52,10 @@ _BETWEEN_DFS_WAIT = 2.0
 
 def _multi_search(
     keyword: str,
-    on_turn: "((int, int, str, int, int) -> None) | None" = None
+    on_turn: "((int, int, str, int, int) -> None) | None" = None,
 ) -> list[dict]:
-    seen:        set[str]    = set()
-    all_results: list[dict]  = []
+    seen:        set[str]   = set()
+    all_results: list[dict] = []
 
     for turn in range(DDGS_TURNS):
         query_template = DDGS_SEARCH_QUERIES[turn % len(DDGS_SEARCH_QUERIES)]
@@ -77,7 +73,7 @@ def _multi_search(
             all_results.extend(new)
             if on_turn:
                 on_turn(turn + 1, DDGS_TURNS, query, len(new), len(all_results))
-        except Exception as exc:
+        except Exception:
             if on_turn:
                 on_turn(turn + 1, DDGS_TURNS, query, 0, len(all_results))
 
@@ -114,7 +110,7 @@ def _extract_page_data(result, url: str, keyword: str, parent_url: str | None) -
             links_found.append(lnk)
     links_found = links_found[:80]
 
-    iframes = re.findall(r'<iframe[^>]+src=["\'"]([^"\']+)["\']', html, re.IGNORECASE)
+    iframes = re.findall(r'<iframe[^>]+src=["\']([^"\']+)["\']', html, re.IGNORECASE)
 
     stream_urls: list[str] = []
     for ext in TARGET_STREAM_EXTENSIONS:
@@ -152,9 +148,13 @@ def _extract_page_data(result, url: str, keyword: str, parent_url: str | None) -
         "iframes":      iframes,
         "stream_urls":  stream_urls,
         "cdn_headers":  cdn_headers,
-        "_raw_html":    html[:30_000],   # kept for ad onclick detection; not stored in DB
+        "_raw_html":    html[:30_000],
         "score":        0,
         "crawled_at":   datetime.now(timezone.utc).isoformat(),
+        "is_ad_page":   False,
+        "is_player_page": False,
+        "is_official":  False,
+        "is_suspicious": False,
     }
 
 
@@ -184,9 +184,8 @@ def _rule_score(page_data: dict) -> int:
     combined    = f"{url_lower} {title_lower} {text_lower}"
     score       = 0
 
-    for domain in OFFICIAL_DOMAINS:
-        if domain in url_lower:
-            return 0
+    if page_data.get("is_official"):
+        return 0
 
     if page_data.get("stream_urls"):
         score += 40
@@ -197,18 +196,12 @@ def _rule_score(page_data: dict) -> int:
         score += 30
         score += min(len(live_iframes) * 5, 20)
 
-    for kw in PIRACY_KEYWORDS:
-        if kw in combined:
+    for kw in (page_data.get("relevant_keywords") or []):
+        if kw.lower() in combined:
             score += 8
 
-    try:
-        domain = urlparse(page_data.get("url", "")).netloc.lower()
-        for sw in SUSPICIOUS_DOMAIN_WORDS:
-            if sw in domain:
-                score += 10
-                break
-    except Exception:
-        pass
+    if page_data.get("is_suspicious"):
+        score += 10
 
     cdn = " ".join(page_data.get("cdn_headers", {}).values()).lower()
     if any(h in cdn for h in ["nginx", "cloudflare", "varnish"]):
@@ -228,30 +221,6 @@ def _stream_type(url: str) -> str:
     if ul.startswith("sopcast"):
         return "sopcast"
     return "other"
-
-
-def _is_official_domain(url: str) -> bool:
-    """Return True if url belongs to a known official broadcaster/platform."""
-    try:
-        netloc = urlparse(url).netloc.lower()
-        for dom in OFFICIAL_DOMAINS:
-            if dom in netloc:
-                return True
-    except Exception:
-        pass
-    return False
-
-
-def _is_ad_interstitial_domain(url: str) -> bool:
-    """Return True if url is a known ad-shortener / interstitial redirect."""
-    try:
-        netloc = urlparse(url).netloc.lower()
-        for dom in AD_INTERSTITIAL_DOMAINS:
-            if dom in netloc:
-                return True
-    except Exception:
-        pass
-    return False
 
 
 class Scraper:
@@ -335,7 +304,7 @@ class Scraper:
         candidates = [r["url"] for r in all_results]
 
         self._emit(E.SEARCH_CANDIDATES, {
-            "total": len(candidates),
+            "total":      len(candidates),
             "candidates": candidates,
         })
 
@@ -345,7 +314,7 @@ class Scraper:
             if self._total_pages >= MAX_TOTAL_PAGES:
                 break
             col_name = tree_map[start_url]
-            await self._dfs(start_url, col_name)
+            await self._crawl_tree(start_url, col_name)
             if idx < len(candidates):
                 await asyncio.sleep(_BETWEEN_DFS_WAIT)
 
@@ -361,7 +330,7 @@ class Scraper:
 
         return [s["stream_url"] for s in streams]
 
-    async def _dfs(self, start_url: str, tree_col_name: str) -> None:
+    async def _crawl_tree(self, start_url: str, tree_col_name: str) -> None:
         self._emit(E.CRAWL_TREE_START, {
             "start_url":    start_url,
             "tree_col":     tree_col_name,
@@ -405,25 +374,6 @@ class Scraper:
                 if depth > MAX_DEPTH:
                     continue
 
-                # Fix 1: Hard-block official broadcaster domains
-                if _is_official_domain(url):
-                    self._emit(E.CRAWL_PAGE_FAIL, {
-                        "url": url, "depth": depth,
-                        "tree_col": tree_col_name,
-                        "reason": "official_domain_blocked",
-                    })
-                    continue
-
-                # Block known ad-interstitial redirect domains
-                if _is_ad_interstitial_domain(url):
-                    self._emit(E.CRAWL_PAGE_FAIL, {
-                        "url": url, "depth": depth,
-                        "tree_col": tree_col_name,
-                        "reason": "ad_interstitial_domain_skipped",
-                    })
-                    continue
-
-                # Fix 4: Proper backtracking — treat dead_streak as node-level signal
                 if dead_streak >= MAX_DEAD_PAGES_BEFORE_BACKTRACK:
                     self._emit(E.CRAWL_PAGE_FAIL, {
                         "url": url, "depth": depth,
@@ -447,12 +397,46 @@ class Scraper:
                 if page_data is None:
                     self._emit(E.CRAWL_PAGE_FAIL, {
                         "url": url, "depth": depth, "tree_col": tree_col_name,
+                        "reason": "crawl_failed",
                     })
                     continue
 
                 page_data["depth"] = depth
 
-                await self._handle_ads(crawler, run_cfg, url, page_data)
+                classification = await self._llm_call(self._llm.classify_page, page_data)
+                page_data["is_official"]        = classification.get("is_official", False)
+                page_data["is_suspicious"]      = classification.get("is_suspicious", False)
+                page_data["is_player_page"]     = classification.get("is_player_page", False)
+                page_data["is_piracy_host"]     = classification.get("is_piracy_host", False)
+                page_data["relevant_keywords"]  = classification.get("relevant_keywords", [])
+
+                self._emit(E.LLM_CLASSIFY, {
+                    "url":              url,
+                    "is_official":      page_data["is_official"],
+                    "is_suspicious":    page_data["is_suspicious"],
+                    "is_player_page":   page_data["is_player_page"],
+                    "is_piracy_host":   page_data["is_piracy_host"],
+                    "reason":           classification.get("reason", ""),
+                    "tree_col":         tree_col_name,
+                })
+
+                if page_data["is_official"]:
+                    self._emit(E.CRAWL_PAGE_FAIL, {
+                        "url": url, "depth": depth,
+                        "tree_col": tree_col_name,
+                        "reason": "official_domain_blocked",
+                    })
+                    continue
+
+                ad_info = await self._handle_ads(crawler, run_cfg, url, page_data)
+
+                if ad_info.get("is_ad_page", False):
+                    self._emit(E.CRAWL_PAGE_FAIL, {
+                        "url": url, "depth": depth,
+                        "tree_col": tree_col_name,
+                        "reason": "ad_page_discarded",
+                    })
+                    continue
 
                 rule  = _rule_score(page_data)
                 score = await self._score_page_async(page_data, rule, tree_col_name)
@@ -461,15 +445,18 @@ class Scraper:
                 self._upsert_node(page_data, tree_col_name)
 
                 self._emit(E.CRAWL_PAGE_DONE, {
-                    "url":         url,
-                    "depth":       depth,
-                    "score":       score,
-                    "flagged":     score >= PIRACY_SCORE_THRESHOLD,
-                    "title":       page_data.get("title", ""),
-                    "stream_urls": page_data.get("stream_urls", []),
-                    "iframes":     page_data.get("iframes", []),
-                    "links_found": len(page_data.get("links_found", [])),
-                    "tree_col":    tree_col_name,
+                    "url":            url,
+                    "depth":          depth,
+                    "score":          score,
+                    "flagged":        score >= PIRACY_SCORE_THRESHOLD,
+                    "title":          page_data.get("title", ""),
+                    "stream_urls":    page_data.get("stream_urls", []),
+                    "iframes":        page_data.get("iframes", []),
+                    "links_found":    len(page_data.get("links_found", [])),
+                    "tree_col":       tree_col_name,
+                    "is_player_page": page_data.get("is_player_page", False),
+                    "is_suspicious":  page_data.get("is_suspicious", False),
+                    "parent_url":     parent_url,
                 })
 
                 found_stream = await self._collect_streams(page_data, score)
@@ -489,13 +476,14 @@ class Scraper:
                         self.keyword, rule, dead_streak,
                     )
                     self._emit(E.LLM_NAVIGATE, {
-                        "url":       url,
-                        "depth":     depth,
-                        "action":    nav.get("action"),
-                        "signal":    nav.get("signal"),
-                        "reason":    nav.get("reason"),
-                        "next_urls": nav.get("next_urls", []),
-                        "tree_col":  tree_col_name,
+                        "url":        url,
+                        "depth":      depth,
+                        "action":     nav.get("action"),
+                        "signal":     nav.get("signal"),
+                        "reason":     nav.get("reason"),
+                        "next_urls":  nav.get("next_urls", []),
+                        "tree_col":   tree_col_name,
+                        "parent_url": url,
                     })
 
                     if nav.get("action") == "continue":
@@ -507,8 +495,8 @@ class Scraper:
                             stack.append((u, depth + 1, child_dead, url))
 
         self._emit(E.CRAWL_TREE_DONE, {
-            "start_url":    start_url,
-            "tree_col":     tree_col_name,
+            "start_url":     start_url,
+            "tree_col":      tree_col_name,
             "pages_crawled": self._total_pages,
         })
 
@@ -518,23 +506,27 @@ class Scraper:
         run_cfg:   CrawlerRunConfig,
         url:       str,
         page_data: dict,
-    ) -> None:
+    ) -> dict:
         try:
             ad_info = await self._llm_call(self._llm.check_ads, page_data)
         except Exception:
-            return
+            return {"has_ad": False, "is_ad_page": False}
 
         self._emit(E.LLM_AD_CHECK, {
             "url":           url,
             "has_ad":        ad_info.get("has_ad", False),
+            "is_ad_page":    ad_info.get("is_ad_page", False),
             "ad_type":       ad_info.get("ad_type", "none"),
             "action":        ad_info.get("action", "none"),
             "wait_seconds":  ad_info.get("wait_seconds", 0),
             "selector_hint": ad_info.get("selector_hint", ""),
         })
 
+        if ad_info.get("is_ad_page", False):
+            return ad_info
+
         if not ad_info.get("has_ad"):
-            return
+            return ad_info
 
         wait_sec      = int(ad_info.get("wait_seconds", 0))
         selector_hint = ad_info.get("selector_hint", "")
@@ -547,18 +539,13 @@ class Scraper:
             "wait_seconds": wait_sec, "selector_hint": selector_hint,
         })
 
-        # --- Wait for countdown timer ---
         if wait_sec > 0:
             await asyncio.sleep(min(wait_sec + 1, 15))
 
-        # --- Build JS to dismiss the ad ---
-        if action == "click_through" or ad_type == "onclick_redirect":
-            # Block popup windows then click through the player area
+        if action == "click_through" or ad_type in ("onclick_redirect", "fake_play", "redirect_page"):
             dismiss_js = """
-                // Block popup/redirect ads triggered by onclick
                 window._origOpen = window.open;
                 window.open = function() { return null; };
-                // Remove onclick from known ad containers
                 var adContainers = document.querySelectorAll(
                     '[id*=ad],[class*=ad],[id*=overlay],[class*=overlay]'
                 );
@@ -566,7 +553,6 @@ class Scraper:
                     el.removeAttribute('onclick');
                     el.style.display = 'none';
                 });
-                // Click through to the real player
                 var player = document.querySelector(
                     'video, iframe[src*=stream], iframe[src*=embed], '
                     + 'iframe[src*=player], [id*=player], [class*=player]'
@@ -574,10 +560,8 @@ class Scraper:
                 if (player) { player.click(); }
             """
         elif action in ("skip", "close", "wait_and_skip"):
-            # Build selector-based click JS; also try common skip patterns
             hint_lower = selector_hint.lower().replace('"', '\\"')
             dismiss_js = f"""
-                // Try LLM-provided selector hint
                 var found = false;
                 var selectors = [
                     '[id*=skip],[class*=skip]',
@@ -599,7 +583,6 @@ class Scraper:
                     }}
                     if (found) break;
                 }}
-                // Also hide common overlay containers
                 var overlays = document.querySelectorAll(
                     '.overlay,.modal,.popup,.ad-overlay,[id*=overlay],[class*=popup]'
                 );
@@ -613,11 +596,11 @@ class Scraper:
         if dismiss_js:
             try:
                 skip_cfg = CrawlerRunConfig(
-                    cache_mode   = CacheMode.BYPASS,
-                    js_code      = dismiss_js,
-                    page_timeout = REQUEST_TIMEOUT_MS,
-                    verbose      = False,
-                    wait_until   = "domcontentloaded",
+                    cache_mode               = CacheMode.BYPASS,
+                    js_code                  = dismiss_js,
+                    page_timeout             = REQUEST_TIMEOUT_MS,
+                    verbose                  = False,
+                    wait_until               = "domcontentloaded",
                     capture_network_requests = True,
                 )
                 result = await asyncio.wait_for(
@@ -628,7 +611,6 @@ class Scraper:
                     "url": url, "ad_type": ad_type,
                     "selector_hint": selector_hint, "success": result.success,
                 })
-                # Merge any newly captured network requests / stream urls into page_data
                 if result.success and result.network_requests:
                     existing = set(page_data.get("stream_urls", []))
                     for req in result.network_requests:
@@ -645,17 +627,13 @@ class Scraper:
                     "success": False, "error": str(exc),
                 })
 
+        return ad_info
+
     async def _collect_streams(self, page_data: dict, score: int) -> bool:
-        """
-        Collect up to MAX_STREAMS_PER_PLAYER live stream URLs per player/iframe
-        found on the page.  VOD/uploaded streams are rejected before LLM verification.
-        Returns True if at least one stream was recorded.
-        """
         recorded = False
         source   = page_data["url"]
         context  = page_data.get("text_snippet", "")
 
-        # Fix 3: group streams by player
         player_map = extract_players_with_streams(page_data, max_per_player=MAX_STREAMS_PER_PLAYER)
 
         if not player_map:
@@ -667,7 +645,6 @@ class Scraper:
                 if len(player_recorded) >= MAX_STREAMS_PER_PLAYER:
                     break
 
-                # Fix 2: reject VOD/uploaded streams before LLM call
                 if is_vod_url(stream_url):
                     self._emit(E.STREAM_REJECTED, {
                         "stream_url": stream_url,
@@ -720,7 +697,6 @@ class Scraper:
         return recorded
 
     def _upsert_node(self, node: dict, tree_col_name: str) -> None:
-        # Don't persist the raw HTML blob — it's only needed in-memory for ad detection
         db_node = {k: v for k, v in node.items() if k != "_raw_html"}
         self._db.upsert_node(self._session_id, db_node, tree_col_name)
         if self._collection is None or isinstance(self._collection, str):
