@@ -179,12 +179,17 @@ class Database:
             "depth":          node.get("depth", 0),
             "score":          node.get("score", 0),
             "title":          node.get("title", ""),
+            "page_summary":   node.get("page_summary", ""),
             "tree_col":       tree_col_name,
             "stream_urls":    node.get("stream_urls", []),
             "iframes":        node.get("iframes", []),
-            "links_found":    len(node.get("links_found", [])),
+            "links_found":    node.get("links_found", []),
+            "players":        node.get("players", {}),
             "is_player_page": node.get("is_player_page", False),
             "is_ad_page":     node.get("is_ad_page", False),
+            "is_suspicious":  node.get("is_suspicious", False),
+            "is_piracy_host": node.get("is_piracy_host", False),
+            "is_official":    node.get("is_official", False),
             "parent_url":     node.get("parent_url"),
         })
 

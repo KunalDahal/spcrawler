@@ -150,6 +150,33 @@ func (m *Manager) Stop(id string) bool {
 	return true
 }
 
+func (m *Manager) Remove(id string) (bool, error) {
+	s, ok := m.Get(id)
+	if !ok {
+		return false, nil
+	}
+
+	s.mu.RLock()
+	cfg := s.config
+	crawlerSessionID := s.summary.CrawlerSessionID
+	s.mu.RUnlock()
+
+	s.Stop()
+
+	m.mu.Lock()
+	delete(m.sessions, id)
+	m.mu.Unlock()
+
+	if crawlerSessionID == "" {
+		return true, nil
+	}
+
+	if err := m.removeSessionData(cfg, crawlerSessionID); err != nil {
+		return true, err
+	}
+	return true, nil
+}
+
 // StopWithDropDB stops the session and then drops its MongoDB database using
 // the same venv Python that runs the scraper (no extra Go dependency needed).
 func (m *Manager) StopWithDropDB(id string) bool {
@@ -169,6 +196,28 @@ func (m *Manager) StopWithDropDB(id string) bool {
 }
 
 func (m *Manager) dropDatabase(cfg StartRequest) {
+	if python, err := m.resolveVenvPython(); err != nil {
+		log.Printf("spcrawler: drop_db skipped - venv python not ready: %v", err)
+		return
+	} else {
+		if cfg.MongoURI == "" || cfg.DBName == "" {
+			log.Printf("spcrawler: drop_db skipped - missing MongoURI or DBName")
+			return
+		}
+
+		script := fmt.Sprintf(
+			"import pymongo; pymongo.MongoClient(%q).drop_database(%q)",
+			cfg.MongoURI, cfg.DBName,
+		)
+		out, runErr := runCmd(python, "-c", script)
+		if runErr != nil {
+			log.Printf("spcrawler: drop_db failed for %q: %v\n%s", cfg.DBName, runErr, out)
+			return
+		}
+		log.Printf("spcrawler: dropped database %q on %s", cfg.DBName, cfg.MongoURI)
+		return
+	}
+
 	m.venvMu.Lock()
 	python := m.venvPython
 	m.venvMu.Unlock()
@@ -192,6 +241,40 @@ func (m *Manager) dropDatabase(cfg StartRequest) {
 		return
 	}
 	log.Printf("spcrawler: dropped database %q on %s", cfg.DBName, cfg.MongoURI)
+}
+
+func (m *Manager) removeSessionData(cfg StartRequest, crawlerSessionID string) error {
+	python, err := m.resolveVenvPython()
+	if err != nil {
+		return fmt.Errorf("venv python not ready: %w", err)
+	}
+	if cfg.MongoURI == "" || cfg.DBName == "" {
+		return errors.New("missing MongoURI or DBName")
+	}
+
+	script := fmt.Sprintf(`
+from pymongo import MongoClient
+from bson import ObjectId
+
+client = MongoClient(%q)
+db = client[%q]
+session_id = %q
+doc = db["sessions"].find_one({"_id": ObjectId(session_id)}, {"parent_trees": 1})
+for tree in (doc or {}).get("parent_trees", []):
+    col = tree.get("collection")
+    if col:
+        db[col].drop()
+db["streams"].delete_many({"session_id": session_id})
+db["sessions"].delete_one({"_id": ObjectId(session_id)})
+print("removed", session_id)
+`, cfg.MongoURI, cfg.DBName, crawlerSessionID)
+
+	out, runErr := runCmd(python, "-c", script)
+	if runErr != nil {
+		return fmt.Errorf("remove session data failed: %w\n%s", runErr, out)
+	}
+	log.Printf("spcrawler: removed session %q from database %q", crawlerSessionID, cfg.DBName)
+	return nil
 }
 
 func (m *Manager) Shutdown() {

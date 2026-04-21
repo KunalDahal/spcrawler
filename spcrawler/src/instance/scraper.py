@@ -31,7 +31,6 @@ from ..utils.constants import (
     MAX_DEAD_PAGES_BEFORE_BACKTRACK,
     DEAD_END_SCORE,
     MAX_TOTAL_PAGES,
-    MIN_DELAY_BETWEEN_LLM_CALLS,
     MAX_STREAMS_PER_PLAYER,
 )
 from ..client.model import get_model
@@ -52,7 +51,7 @@ _BETWEEN_DFS_WAIT = 2.0
 
 def _multi_search(
     keyword: str,
-    on_turn: "((int, int, str, int, int) -> None) | None" = None,
+    on_turn: "((int, int, str, int, int, list[dict]) -> None) | None" = None,
 ) -> list[dict]:
     seen:        set[str]   = set()
     all_results: list[dict] = []
@@ -72,10 +71,10 @@ def _multi_search(
                 seen.add(item["url"])
             all_results.extend(new)
             if on_turn:
-                on_turn(turn + 1, DDGS_TURNS, query, len(new), len(all_results))
+                on_turn(turn + 1, DDGS_TURNS, query, len(new), len(all_results), new)
         except Exception:
             if on_turn:
-                on_turn(turn + 1, DDGS_TURNS, query, 0, len(all_results))
+                on_turn(turn + 1, DDGS_TURNS, query, 0, len(all_results), [])
 
         if turn < DDGS_TURNS - 1:
             time.sleep(DDGS_TURN_DELAY)
@@ -143,6 +142,7 @@ def _extract_page_data(result, url: str, keyword: str, parent_url: str | None) -
         "url":          url,
         "parent_url":   parent_url,
         "title":        (result.metadata or {}).get("title", ""),
+        "page_summary": text_snippet,
         "text_snippet": text_snippet,
         "links_found":  links_found,
         "iframes":      iframes,
@@ -441,6 +441,10 @@ class Scraper:
                 rule  = _rule_score(page_data)
                 score = await self._score_page_async(page_data, rule, tree_col_name)
                 page_data["score"] = score
+                page_data["players"] = extract_players_with_streams(
+                    page_data,
+                    max_per_player=MAX_STREAMS_PER_PLAYER,
+                )
 
                 self._upsert_node(page_data, tree_col_name)
 
@@ -450,12 +454,16 @@ class Scraper:
                     "score":          score,
                     "flagged":        score >= PIRACY_SCORE_THRESHOLD,
                     "title":          page_data.get("title", ""),
+                    "page_summary":   page_data.get("page_summary", ""),
                     "stream_urls":    page_data.get("stream_urls", []),
                     "iframes":        page_data.get("iframes", []),
-                    "links_found":    len(page_data.get("links_found", [])),
+                    "links_found":    page_data.get("links_found", []),
+                    "players":        page_data.get("players", {}),
                     "tree_col":       tree_col_name,
                     "is_player_page": page_data.get("is_player_page", False),
                     "is_suspicious":  page_data.get("is_suspicious", False),
+                    "is_piracy_host": page_data.get("is_piracy_host", False),
+                    "is_official":    page_data.get("is_official", False),
                     "parent_url":     parent_url,
                 })
 
@@ -730,7 +738,6 @@ class Scraper:
     async def _llm_call(self, fn, *args):
         async with self._llm_sem:
             result = await asyncio.to_thread(fn, *args)
-            await asyncio.sleep(MIN_DELAY_BETWEEN_LLM_CALLS)
             return result
 
     async def _crawl_page(
@@ -784,7 +791,14 @@ class Scraper:
         sid = self._session_id
         bus = self._bus
 
-        def on_turn(turn: int, total: int, query: str, new_count: int, total_count: int) -> None:
+        def on_turn(
+            turn: int,
+            total: int,
+            query: str,
+            new_count: int,
+            total_count: int,
+            results: list[dict],
+        ) -> None:
             bus.emit(Event(
                 type       = E.SEARCH_TURN_DONE,
                 session_id = sid,
@@ -794,6 +808,7 @@ class Scraper:
                     "query":       query,
                     "new_results": new_count,
                     "total":       total_count,
+                    "results":     results,
                 },
             ))
 

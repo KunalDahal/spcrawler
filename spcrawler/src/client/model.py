@@ -16,6 +16,7 @@ from ..utils.constants import (
     MIN_DELAY_BETWEEN_LLM_CALLS,
     LLM_BACKOFF_BASE,
     LLM_BACKOFF_MAX,
+    LLM_RATE_LIMIT_COOLDOWN,
 )
 
 _BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
@@ -44,9 +45,10 @@ class Model:
         self._emit           = emit
         self._lock           = threading.Lock()
         self._last_call_time = 0.0
+        self._cooldown_until = 0.0
         self._call_count     = 0
 
-    def call(self, system_prompt: str, user_message: str) -> str:
+    def call(self, system_prompt: str, user_message: str, *, operation: str = "unknown") -> str:
         url = f"{_BASE_URL}/{LLM_MODEL}:generateContent?key={self._api_key}"
         payload = {
             "system_instruction": {"parts": [{"text": system_prompt}]},
@@ -58,11 +60,16 @@ class Model:
         }
 
         with self._lock:
-            self._throttle()
+            self._throttle(operation)
             backoff = float(LLM_BACKOFF_BASE)
 
             for attempt in range(1, LLM_MAX_RETRIES + 1):
                 try:
+                    self._emit("llm.call_start", {
+                        "operation":   operation,
+                        "attempt":     attempt,
+                        "max_retries": LLM_MAX_RETRIES,
+                    })
                     resp = requests.post(url, json=payload, timeout=30)
 
                     if resp.status_code == 429:
@@ -70,10 +77,15 @@ class Model:
                             self._retry_after(resp, backoff) + random.uniform(1, 5),
                             LLM_BACKOFF_MAX,
                         )
+                        self._cooldown_until = max(
+                            self._cooldown_until,
+                            time.monotonic() + wait + LLM_RATE_LIMIT_COOLDOWN,
+                        )
                         self._emit("llm.rate_limit", {
                             "wait_seconds": int(wait),
                             "attempt":      attempt,
                             "max_retries":  LLM_MAX_RETRIES,
+                            "operation":    operation,
                         })
                         time.sleep(wait)
                         backoff = min(backoff * 2, LLM_BACKOFF_MAX)
@@ -86,6 +98,7 @@ class Model:
                             "attempt":     attempt,
                             "max_retries": LLM_MAX_RETRIES,
                             "wait_seconds": int(wait),
+                            "operation":   operation,
                         })
                         time.sleep(wait)
                         backoff = min(backoff * 1.5, LLM_BACKOFF_MAX)
@@ -95,7 +108,10 @@ class Model:
                     data = resp.json()
                     self._last_call_time  = time.monotonic()
                     self._call_count     += 1
-                    self._emit("llm.call_ok", {"call_count": self._call_count})
+                    self._emit("llm.call_ok", {
+                        "call_count": self._call_count,
+                        "operation":  operation,
+                    })
                     return data["candidates"][0]["content"]["parts"][0]["text"].strip()
 
                 except requests.exceptions.HTTPError as exc:
@@ -103,6 +119,7 @@ class Model:
                         self._emit("llm.failed", {
                             "attempts": LLM_MAX_RETRIES,
                             "error":    str(exc),
+                            "operation": operation,
                         })
                         raise
                     wait = min(backoff + random.uniform(1, 5), LLM_BACKOFF_MAX)
@@ -111,6 +128,7 @@ class Model:
                         "max_retries":  LLM_MAX_RETRIES,
                         "wait_seconds": int(wait),
                         "error":        str(exc),
+                        "operation":    operation,
                     })
                     time.sleep(wait)
                     backoff = min(backoff * 2, LLM_BACKOFF_MAX)
@@ -119,6 +137,7 @@ class Model:
                     self._emit("llm.timeout", {
                         "attempt":     attempt,
                         "max_retries": LLM_MAX_RETRIES,
+                        "operation":   operation,
                     })
                     if attempt == LLM_MAX_RETRIES:
                         raise
@@ -126,15 +145,31 @@ class Model:
                     backoff = min(backoff * 1.5, LLM_BACKOFF_MAX)
 
                 except Exception as exc:
-                    self._emit("llm.unexpected_error", {"error": str(exc)})
+                    self._emit("llm.unexpected_error", {
+                        "error":     str(exc),
+                        "operation": operation,
+                    })
                     raise
 
         raise RuntimeError("call() exhausted retries without returning")
 
-    def _throttle(self) -> None:
-        elapsed = time.monotonic() - self._last_call_time
-        if elapsed < MIN_DELAY_BETWEEN_LLM_CALLS:
-            time.sleep(MIN_DELAY_BETWEEN_LLM_CALLS - elapsed)
+    def _throttle(self, operation: str) -> None:
+        now = time.monotonic()
+        next_allowed = max(
+            self._last_call_time + MIN_DELAY_BETWEEN_LLM_CALLS,
+            self._cooldown_until,
+        )
+        wait = max(0.0, next_allowed - now)
+        if wait <= 0:
+            return
+
+        self._emit("llm.cooldown", {
+            "operation":     operation,
+            "wait_seconds":  round(wait, 1),
+            "min_delay":     MIN_DELAY_BETWEEN_LLM_CALLS,
+            "cooldown_until": self._cooldown_until,
+        })
+        time.sleep(wait)
 
     @staticmethod
     def _retry_after(resp: requests.Response, default: float) -> float:

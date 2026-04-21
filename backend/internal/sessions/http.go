@@ -63,6 +63,20 @@ func RegisterHandlers(mux *http.ServeMux, manager *Manager) {
 			return
 		}
 
+		if tail == "remove" && r.Method == http.MethodPost {
+			ok, err := manager.Remove(id)
+			if !ok {
+				writeError(w, http.StatusNotFound, "session not found")
+				return
+			}
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			writeJSON(w, http.StatusOK, map[string]string{"status": "removed"})
+			return
+		}
+
 		if tail == "events" && r.Method == http.MethodGet {
 			streamEvents(w, r, session)
 			return

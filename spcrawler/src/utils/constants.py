@@ -4,9 +4,10 @@ LLM_MODEL                   = "gemini-2.5-flash-lite"
 LLM_MAX_TOKENS              = 1024
 LLM_TEMPERATURE             = 0.2
 LLM_MAX_RETRIES             = 5
-MIN_DELAY_BETWEEN_LLM_CALLS = 8.0
+MIN_DELAY_BETWEEN_LLM_CALLS = 12.0
 LLM_BACKOFF_BASE            = 20
 LLM_BACKOFF_MAX             = 120
+LLM_RATE_LIMIT_COOLDOWN     = 30.0
 
 MAX_DEPTH          = 6
 REQUEST_TIMEOUT_MS = 30_000

@@ -41,7 +41,7 @@ class LLM:
             rule_score   = rule_score,
             dead_streak  = dead_streak,
         )
-        raw = self._model.call(prompts.NAVIGATE_SYSTEM, payload)
+        raw = self._model.call(prompts.NAVIGATE_SYSTEM, payload, operation="navigate")
         try:
             clean = re.sub(r"```[a-z]*|```", "", raw).strip()
             data  = json.loads(clean)
@@ -69,7 +69,7 @@ class LLM:
             f"CDN headers: {page_data.get('cdn_headers', {})}\n"
         )
         try:
-            raw   = self._model.call(prompts.SCORE_SYSTEM, payload)
+            raw   = self._model.call(prompts.SCORE_SYSTEM, payload, operation="score_page")
             match = re.search(r"\d+", raw)
             return max(0, min(100, int(match.group()))) if match else 0
         except Exception:
@@ -112,7 +112,7 @@ class LLM:
             onclicks  = onclicks[:3],
         )
         try:
-            raw   = self._model.call(prompts.AD_CHECK_SYSTEM, payload).strip()
+            raw   = self._model.call(prompts.AD_CHECK_SYSTEM, payload, operation="check_ads").strip()
             clean = re.sub(r"```[a-z]*|```", "", raw).strip()
             data  = json.loads(clean)
             data.setdefault("has_ad", False)
@@ -132,7 +132,7 @@ class LLM:
     def verify_live(self, url: str, context: str = "") -> bool:
         payload = f"URL: {url}\nContext: {context[:300]}"
         try:
-            raw = self._model.call(prompts.VERIFY_LIVE_SYSTEM, payload).strip().upper()
+            raw = self._model.call(prompts.VERIFY_LIVE_SYSTEM, payload, operation="verify_live").strip().upper()
             return raw.startswith("LIVE") and "NOT" not in raw
         except Exception:
             return False
@@ -146,7 +146,7 @@ class LLM:
             stream_urls = page_data.get("stream_urls", []),
         )
         try:
-            raw   = self._model.call(prompts.CLASSIFY_PAGE_SYSTEM, payload).strip()
+            raw   = self._model.call(prompts.CLASSIFY_PAGE_SYSTEM, payload, operation="classify_page").strip()
             clean = re.sub(r"```[a-z]*|```", "", raw).strip()
             data  = json.loads(clean)
             data.setdefault("is_official", False)
